@@ -1,0 +1,28 @@
+name: Aparat Scraper
+
+on:
+  repository_dispatch:
+    types: [run_aparat]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+      
+      - name: Run Aparat script
+        run: python Aparat.py
+        env:
+          LINK: ${{ github.event.client_payload.link }}
+          QUALITY: ${{ github.event.client_payload.quality }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          USER_ID: ${{ secrets.USER_ID }}
