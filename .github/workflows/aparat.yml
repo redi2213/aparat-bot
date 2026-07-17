@@ -17,7 +17,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 pyTelegramBotAPI
       
       - name: Run Aparat script
         run: python Aparat.py
