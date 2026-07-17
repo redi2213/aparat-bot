@@ -1,6 +1,4 @@
-- name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 pyTelegramBotAPIname: Aparat Scraper
+name: Aparat Scraper
 
 on:
   repository_dispatch:
@@ -18,8 +16,7 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 pyTelegramBotAPI
+        run: pip install requests beautifulsoup4 pyTelegramBotAPI
       
       - name: Run Aparat script
         run: python Aparat.py
