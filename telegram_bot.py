@@ -4,13 +4,11 @@ import os
 from telebot import types
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-USER_ID = int(os.getenv('USER_ID'))
+USER_ID = int(os.getenv('USER_ID', '0'))
 GITHUB_TOKEN = os.getenv('GH_TOKEN')
-REPO = "redi2213/aparat-bot"  # تغییر دهید اگر ریپو‌تون اسم دیگه‌ای داره
+REPO = "redi2213/aparat-bot"
 
 bot = telebot.TeleBot(TOKEN)
-
-# ذخیره وضعیت کاربر
 user_data = {}
 
 @bot.message_handler(commands=['start'])
@@ -29,15 +27,12 @@ def handle_link(message):
     
     link = message.text.strip()
     
-    # چک کنید لینک درست باشه
     if "/playlist/" not in link and "/v/" not in link:
         bot.reply_to(message, "❌ لینک نامعتبره. لینک صحیح بفرستید.")
         return
     
-    # ذخیره لینک
-    user_data[message.from_user.id] = {'link': link, 'message_id': message.message_id}
+    user_data[message.from_user.id] = {'link': link}
     
-    # دکمه‌های کیفیت
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("🎬 Best", callback_data="quality_best"),
@@ -63,18 +58,15 @@ def handle_quality(call):
         bot.answer_callback_query(call.id, "❌ لینک گم شد", show_alert=True)
         return
     
-    # ویرایش پیام
     bot.edit_message_text(
         "⏳ در حال پردازش...",
         call.message.chat.id,
         call.message.message_id
     )
     
-    # فعال کردن GitHub Actions
-    trigger_github_action(link, quality, call.message.chat.id, call.message.message_id)
+    trigger_github_action(link, quality, call.message.chat.id)
 
-def trigger_github_action(link, quality, chat_id, message_id):
-    """GitHub Actions رو فعال کنید"""
+def trigger_github_action(link, quality, chat_id):
     url = f"https://api.github.com/repos/{REPO}/dispatches"
     
     headers = {
@@ -87,15 +79,14 @@ def trigger_github_action(link, quality, chat_id, message_id):
         "client_payload": {
             "link": link,
             "quality": quality,
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": chat_id
         }
     }
     
     try:
         response = requests.post(url, json=payload, headers=headers)
         if response.status_code == 204:
-            bot.send_message(chat_id, "✅ درخواست ارسال شد!\n⏳ اسکریپت در حال اجرا است...")
+            bot.send_message(chat_id, "✅ درخواست ارسال شد!\n⏳ اسکریپت در حال اجرا است...\n\nنتیجه تو چند دقیقه می‌ره")
         else:
             bot.send_message(chat_id, f"❌ خطا: {response.text}")
     except Exception as e:
