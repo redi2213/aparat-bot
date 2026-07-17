@@ -1,4 +1,6 @@
-name: Aparat Scraper
+- name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 pyTelegramBotAPIname: Aparat Scraper
 
 on:
   repository_dispatch:
