@@ -5,7 +5,7 @@ from telebot import types
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 USER_ID = int(os.getenv('USER_ID'))
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+GITHUB_TOKEN = os.getenv('GH_TOKEN')
 REPO = "redi2213/aparat-bot"  # تغییر دهید اگر ریپو‌تون اسم دیگه‌ای داره
 
 bot = telebot.TeleBot(TOKEN)
