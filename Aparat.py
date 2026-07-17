@@ -10,7 +10,7 @@ LINK = os.getenv('LINK', '').strip()
 QUALITY = os.getenv('QUALITY', 'best')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 USER_ID = int(os.getenv('USER_ID', '0'))
-CHAT_ID = os.getenv('CHAT_ID', '0')
+CHAT_ID = os.getenv('CHAT_ID', '6824468282')
 
 headers = {
     "User-Agent": "Mozilla/5.0",

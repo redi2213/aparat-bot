@@ -25,3 +25,4 @@ jobs:
           QUALITY: ${{ github.event.client_payload.quality }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           USER_ID: ${{ secrets.USER_ID }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
