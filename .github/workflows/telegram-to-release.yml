@@ -57,7 +57,34 @@ jobs:
 
       - name: Install tdl
         run: |
-          curl -sSL https://docs.iyear.me/tdl/install.sh | sudo bash -s -- --version 0.20.4
+          VERSION="0.20.4"
+          URL="https://github.com/iyear/tdl/releases/download/v${VERSION}/tdl_Linux_64bit.tar.gz"
+
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: downloading tdl $VERSION..."
+            curl -fL --retry 3 --retry-delay 2 -o tdl.tar.gz "$URL"
+
+            # Verify it's actually a gzip archive, not a truncated/partial file
+            if gzip -t tdl.tar.gz 2>/dev/null; then
+              echo "Download OK."
+              break
+            fi
+
+            echo "Downloaded archive is corrupt/incomplete, retrying..."
+            rm -f tdl.tar.gz
+            sleep 3
+
+            if [ "$i" -eq 5 ]; then
+              echo "Failed to download a valid tdl archive after 5 attempts."
+              exit 1
+            fi
+          done
+
+          tar -xzf tdl.tar.gz tdl
+          chmod +x tdl
+          sudo mv tdl /usr/local/bin/tdl
+          rm -f tdl.tar.gz
+
           tdl version
 
       - name: Restore Telegram session
