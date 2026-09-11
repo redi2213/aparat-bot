@@ -1,0 +1,94 @@
+name: Telegram to GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_url:
+        description: "Telegram public message URL"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tdl
+        run: |
+          curl -sSL https://docs.iyear.me/tdl/install.sh | sudo bash
+          tdl version
+
+      - name: Restore Telegram session
+        env:
+          TDL_SESSION: ${{ secrets.TDL_SESSION }}
+        run: |
+          mkdir -p "$HOME/tdl-data"
+          echo "$TDL_SESSION" | base64 -d > "$HOME/telegram-session.tdl"
+
+          tdl recover \
+            -f "$HOME/telegram-session.tdl" \
+            -n default \
+            --storage "type=bolt,path=$HOME/tdl-data"
+
+      - name: Download Telegram file
+        env:
+          TELEGRAM_URL: ${{ inputs.telegram_url }}
+        run: |
+          mkdir -p "$HOME/tg-download"
+          cd "$HOME/tg-download"
+
+          tdl dl \
+            -n default \
+            --storage "type=bolt,path=$HOME/tdl-data" \
+            -u "$TELEGRAM_URL"
+
+          echo "Downloaded files:"
+          find . -type f -printf '%p\n'
+
+      - name: Find downloaded file
+        id: find_file
+        run: |
+          FILE=$(find "$HOME/tg-download" -type f | head -n 1)
+
+          if [ -z "$FILE" ]; then
+            echo "No downloaded file found."
+            exit 1
+          fi
+
+          echo "FILE=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Found: $FILE"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.find_file.outputs.FILE }}
+          TELEGRAM_URL: ${{ inputs.telegram_url }}
+        run: |
+          TAG="tg-$(date +%Y%m%d-%H%M%S)"
+
+          gh release create "$TAG" "$FILE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Telegram Download $(date '+%Y-%m-%d %H:%M:%S')" \
+            --notes "Downloaded from Telegram message: $TELEGRAM_URL"
+
+          echo "======================================"
+          echo "Release created:"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          echo "======================================"
+
+      - name: Show direct asset URL
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.find_file.outputs.FILE }}
+        run: |
+          TAG=$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')
+
+          gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY"
