@@ -20,8 +20,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Get Telegram URL
-        id: get_url
+        id: get_data
         env:
           DISPATCH_URL: ${{ github.event.client_payload.telegram_url }}
           MANUAL_URL: ${{ inputs.telegram_url }}
@@ -38,6 +39,19 @@ jobs:
           fi
 
           echo "telegram_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Telegram - started
+        if: github.event_name == 'repository_dispatch'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=⏳ دانلود شروع شد...
+
+فایل روی GitHub در حال دریافت است."
 
       - name: Install tdl
         run: |
@@ -60,7 +74,7 @@ jobs:
 
       - name: Download Telegram file
         env:
-          TELEGRAM_URL: ${{ steps.get_url.outputs.telegram_url }}
+          TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
         run: |
           mkdir -p "$HOME/tg-download"
           cd "$HOME/tg-download"
@@ -73,7 +87,7 @@ jobs:
       - name: Find downloaded file
         id: find_file
         run: |
-          FILE=$(find "$HOME/tg-download" -type f | head -n 1)
+          FILE=$(find "$HOME/tg-download/downloads" -type f | head -n 1)
 
           if [ -z "$FILE" ]; then
             echo "No downloaded file found."
@@ -84,10 +98,11 @@ jobs:
           echo "Downloaded: $FILE"
 
       - name: Create GitHub Release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           FILE: ${{ steps.find_file.outputs.FILE }}
-          TELEGRAM_URL: ${{ steps.get_url.outputs.telegram_url }}
+          TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
         run: |
           TAG="tg-$(date +%Y%m%d-%H%M%S)"
 
@@ -96,11 +111,66 @@ jobs:
             --title "Telegram Download $(date '+%Y-%m-%d %H:%M:%S')" \
             --notes "Downloaded from Telegram message: $TELEGRAM_URL"
 
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+
+          echo "Release created:"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: Get direct download URL
+        id: direct_url
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.TAG }}
+        run: |
+          DIRECT_URL=$(gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[0].browser_download_url')
+
+          if [ -z "$DIRECT_URL" ] || [ "$DIRECT_URL" = "null" ]; then
+            echo "Could not get direct download URL"
+            exit 1
+          fi
+
+          echo "DIRECT_URL=$DIRECT_URL" >> "$GITHUB_OUTPUT"
+
+          echo "=========================================="
+          echo "Direct download URL:"
+          echo "$DIRECT_URL"
+          echo "=========================================="
+
+      - name: Send direct download link to Telegram
+        if: github.event_name == 'repository_dispatch'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          DIRECT_URL: ${{ steps.direct_url.outputs.DIRECT_URL }}
+        run: |
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=✅ دانلود با موفقیت انجام شد!
+
+🔗 لینک مستقیم دانلود:
+
+${DIRECT_URL}"
 
       - name: Show result
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" \
+          gh release view "${{ steps.release.outputs.TAG }}" \
             --repo "$GITHUB_REPOSITORY"
+
+      - name: Notify Telegram - failed
+        if: failure() && github.event_name == 'repository_dispatch'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=❌ دانلود تلگرام ناموفق بود.
+
+لاگ اجرای GitHub Actions را بررسی کنید."
