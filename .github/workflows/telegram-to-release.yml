@@ -98,7 +98,7 @@ jobs:
 
           tdl recover \
             -f "$HOME/telegram-session.tdl" \
-            -n default \
+            -n test \
             --storage "type=bolt,path=$HOME/tdl-data"
 
           # Non-secret sanity check: confirm a namespace/session was actually
@@ -115,7 +115,7 @@ jobs:
           cd "$HOME/tg-download"
 
           tdl dl \
-            -n default \
+            -n test \
             --storage "type=bolt,path=$HOME/tdl-data" \
             -u "$TELEGRAM_URL"
 
