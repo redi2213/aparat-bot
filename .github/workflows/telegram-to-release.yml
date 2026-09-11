@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Get Telegram URL
         id: get_data
         env:
@@ -45,12 +46,14 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
         run: |
+          TEXT=$(printf '%s\n\n%s' \
+            '⏳ دانلود شروع شد...' \
+            'فایل روی GitHub در حال دریافت است.')
+
           curl -sS -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=⏳ دانلود شروع شد...
-
-فایل روی GitHub در حال دریافت است."
+            --data-urlencode "text=${TEXT}"
 
       - name: Install tdl
         run: |
@@ -123,9 +126,8 @@ jobs:
         run: |
           sleep 2
 
-          DIRECT_URL=$(gh release view "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets \
+          DIRECT_URL=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
             --jq '.assets[0].browser_download_url')
 
           if [ -z "$DIRECT_URL" ] || [ "$DIRECT_URL" = "null" ]; then
@@ -147,14 +149,15 @@ jobs:
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           DIRECT_URL: ${{ steps.direct_url.outputs.DIRECT_URL }}
         run: |
+          TEXT=$(printf '%s\n\n%s\n%s' \
+            '✅ دانلود با موفقیت انجام شد!' \
+            '🔗 لینک مستقیم دانلود:' \
+            "$DIRECT_URL")
+
           RESPONSE=$(curl -sS -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ دانلود با موفقیت انجام شد!
-
-🔗 لینک مستقیم دانلود:
-
-${DIRECT_URL}")
+            --data-urlencode "text=${TEXT}")
 
           echo "$RESPONSE"
 
@@ -178,9 +181,11 @@ ${DIRECT_URL}")
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
         run: |
+          TEXT=$(printf '%s\n\n%s' \
+            '❌ دانلود تلگرام ناموفق بود.' \
+            'لاگ اجرای GitHub Actions را بررسی کنید.')
+
           curl -sS -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=❌ دانلود تلگرام ناموفق بود.
-
-لاگ اجرای GitHub Actions را بررسی کنید."
+            --data-urlencode "text=${TEXT}"
