@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Get Telegram URL
         id: get_data
         env:
@@ -40,8 +39,8 @@ jobs:
 
           echo "telegram_url=$URL" >> "$GITHUB_OUTPUT"
 
-      - name: Notify Telegram - started
-        if: github.event_name == 'repository_dispatch'
+      - name: Notify Telegram Started
+        if: ${{ github.event_name == 'repository_dispatch' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
@@ -116,12 +115,14 @@ jobs:
           echo "Release created:"
           echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
-      - name: Get direct download URL
+      - name: Get Direct Download URL
         id: direct_url
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.TAG }}
         run: |
+          sleep 2
+
           DIRECT_URL=$(gh release view "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
@@ -139,31 +140,40 @@ jobs:
           echo "$DIRECT_URL"
           echo "=========================================="
 
-      - name: Send direct download link to Telegram
-        if: github.event_name == 'repository_dispatch'
+      - name: Send Direct Download Link
+        if: ${{ github.event_name == 'repository_dispatch' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           DIRECT_URL: ${{ steps.direct_url.outputs.DIRECT_URL }}
         run: |
-          curl -sS -X POST \
+          RESPONSE=$(curl -sS -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
             --data-urlencode "text=✅ دانلود با موفقیت انجام شد!
 
 🔗 لینک مستقیم دانلود:
 
-${DIRECT_URL}"
+${DIRECT_URL}")
 
-      - name: Show result
+          echo "$RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "Telegram notification sent successfully."
+          else
+            echo "Telegram notification failed."
+            exit 1
+          fi
+
+      - name: Show Result
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "${{ steps.release.outputs.TAG }}" \
             --repo "$GITHUB_REPOSITORY"
 
-      - name: Notify Telegram - failed
-        if: failure() && github.event_name == 'repository_dispatch'
+      - name: Notify Telegram Failed
+        if: ${{ failure() && github.event_name == 'repository_dispatch' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
