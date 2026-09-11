@@ -57,7 +57,7 @@ jobs:
 
       - name: Install tdl
         run: |
-          curl -sSL https://docs.iyear.me/tdl/install.sh | sudo bash
+          curl -sSL https://docs.iyear.me/tdl/install.sh | sudo bash -s -- --version 0.20.4
           tdl version
 
       - name: Restore Telegram session
@@ -73,6 +73,12 @@ jobs:
             -f "$HOME/telegram-session.tdl" \
             -n default \
             --storage "type=bolt,path=$HOME/tdl-data"
+
+          # Non-secret sanity check: confirm a namespace/session was actually
+          # written to the bolt storage after recover (does not print any
+          # secret values, only file existence/size).
+          echo "Storage dir contents after recover:"
+          ls -lh "$HOME/tdl-data" || true
 
       - name: Download Telegram file
         env:
