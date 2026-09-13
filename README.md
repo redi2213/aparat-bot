@@ -1,1 +1,0 @@
-# aparat-bot
