@@ -1,0 +1,38 @@
+name: Aparat Scraper
+
+on:
+  repository_dispatch:
+    types: [run_aparat]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Aparat script
+        run: python actions/aparat/scrape.py
+        env:
+          LINK: ${{ github.event.client_payload.link }}
+          QUALITY: ${{ github.event.client_payload.quality }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+
+      - name: Notify Telegram Failed
+        if: ${{ failure() }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=❌ خطا در اجرای اسکریپت آپارات. لاگ Actions را بررسی کنید."
