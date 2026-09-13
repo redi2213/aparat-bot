@@ -11,7 +11,10 @@
 //   github/dispatch.js    - repository_dispatch calls to GitHub Actions
 //   state/session.js      - per-user in-progress job configuration (Cloudflare KV)
 //
-// Required environment variables / secrets (set with `wrangler secret put`):
+// Required environment variables / secrets (synced automatically on every
+// deploy by .github/workflows/deploy-worker.yml from GitHub repo secrets —
+// set/update them under Settings -> Secrets and variables -> Actions,
+// no `wrangler secret put` needed):
 //   TELEGRAM_TOKEN   - Bot token from @BotFather for @aparaat_dl_bot
 //   USER_ID          - Your numeric Telegram user id (only this user is allowed)
 //   GH_TOKEN         - GitHub Personal Access Token with 'repo' scope
