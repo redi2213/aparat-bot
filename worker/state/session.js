@@ -1,0 +1,62 @@
+// worker/state/session.js
+//
+// Per-user "pending job" session, stored in Cloudflare KV (bound as
+// env.STATE). Workers don't keep memory between invocations, so anything
+// that needs to survive across multiple button taps (toggle rename ->
+// toggle zip -> confirm start) has to live here.
+//
+// A session represents ONE job the user is currently configuring, from the
+// moment a link/forward is recognised until they press "شروع پردازش".
+// It's intentionally short-lived (1 hour TTL) — this is a UI scratchpad,
+// not a job history (see history.js for that).
+
+const SESSION_TTL_SECONDS = 3600;
+
+function key(userId) {
+  return `session:${userId}`;
+}
+
+/**
+ * @typedef {Object} JobSession
+ * @property {"telegram"|"direct_url"|"admin_flow"} source
+ * @property {string} link                 - the resolved t.me link or direct http(s) URL (empty for admin_flow)
+ * @property {boolean} rename              - whether the user wants to rename the output file
+ * @property {string|null} customName      - the name they typed, once provided
+ * @property {boolean} zip                 - whether to zip the output before uploading
+ * @property {"awaiting_name"|"menu"|"awaiting_add_user_id"|"awaiting_remove_user_id"|"confirmed"} stage
+ * @property {{kind: "self"|"user"|"all", targetId?: string}} [historyScope] - admin-only: which history view is currently open (used by admin_flow sessions)
+ */
+
+export async function createSession(env, userId, session) {
+  const full = {
+    rename: false,
+    customName: null,
+    zip: false,
+    stage: "menu",
+    ...session,
+  };
+  await env.STATE.put(key(userId), JSON.stringify(full), { expirationTtl: SESSION_TTL_SECONDS });
+  return full;
+}
+
+export async function getSession(env, userId) {
+  const raw = await env.STATE.get(key(userId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function updateSession(env, userId, patch) {
+  const current = await getSession(env, userId);
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  await env.STATE.put(key(userId), JSON.stringify(next), { expirationTtl: SESSION_TTL_SECONDS });
+  return next;
+}
+
+export async function clearSession(env, userId) {
+  await env.STATE.delete(key(userId));
+}
