@@ -1,0 +1,25 @@
+# wrangler.toml
+#
+# Cloudflare Worker deployment config.
+#
+# Deployment happens automatically via GitHub Actions
+# (.github/workflows/deploy-worker.yml) whenever worker/** or this file
+# changes on `main` — no local `wrangler` install needed, which matters
+# since wrangler/workerd has no Android/Termux build.
+#
+# One-time setup (see README.md "راه‌اندازی روی گوشی/ترموکس" for details):
+#   1. Create a Cloudflare API token + note your Account ID
+#   2. Create a KV namespace and put its id below
+#   3. Add these as GitHub repo secrets (Settings -> Secrets and variables -> Actions):
+#        CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+#        TELEGRAM_TOKEN, USER_ID, GH_TOKEN, WEBHOOK_SECRET
+#   4. Push to main — the workflow deploys the Worker and syncs the four
+#      app secrets automatically.
+
+name = "aparat-bot"
+main = "worker/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "555388e275ae4d1fab9461e02a0e4a7a"
