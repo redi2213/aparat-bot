@@ -30,11 +30,13 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Get Telegram URL
+      - name: Get Telegram URL / private chat info
         id: get_data
         env:
           DISPATCH_URL: ${{ github.event.client_payload.telegram_url }}
           MANUAL_URL: ${{ inputs.telegram_url }}
+          DISPATCH_PRIVATE_CHAT_ID: ${{ github.event.client_payload.private_chat_id }}
+          DISPATCH_PRIVATE_MESSAGE_ID: ${{ github.event.client_payload.private_message_id }}
         run: |
           if [ -n "$DISPATCH_URL" ]; then
             URL="$DISPATCH_URL"
@@ -42,12 +44,17 @@ jobs:
             URL="$MANUAL_URL"
           fi
 
-          if [ -z "$URL" ]; then
-            echo "Telegram URL is empty"
+          # Either a URL, or the private-chat export fallback's chat+message
+          # id pair, must be present — see handleForwardedMessage in
+          # worker/telegram/handlers.js for when the fallback is used.
+          if [ -z "$URL" ] && [ -z "$DISPATCH_PRIVATE_CHAT_ID" ]; then
+            echo "Neither telegram_url nor private_chat_id is set"
             exit 1
           fi
 
           echo "telegram_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "private_chat_id=$DISPATCH_PRIVATE_CHAT_ID" >> "$GITHUB_OUTPUT"
+          echo "private_message_id=$DISPATCH_PRIVATE_MESSAGE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Notify Telegram Started
         if: ${{ github.event_name == 'repository_dispatch' }}
@@ -55,6 +62,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
+          PRIVATE_CHAT_ID: ${{ steps.get_data.outputs.private_chat_id }}
+          PRIVATE_MESSAGE_ID: ${{ steps.get_data.outputs.private_message_id }}
           STAGE: started
         run: python actions/telegram_download/download.py
 
@@ -115,6 +124,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
+          PRIVATE_CHAT_ID: ${{ steps.get_data.outputs.private_chat_id }}
+          PRIVATE_MESSAGE_ID: ${{ steps.get_data.outputs.private_message_id }}
           EXPECTED_SIZE: ${{ github.event.client_payload.expected_size }}
           TDL_NAMESPACE: quickstart
           STAGE: run_download
@@ -161,6 +172,20 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
           echo "TITLE=Telegram Download $(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare release notes
+        id: release_notes
+        env:
+          URL: ${{ steps.get_data.outputs.telegram_url }}
+          PRIVATE_CHAT_ID: ${{ steps.get_data.outputs.private_chat_id }}
+          PRIVATE_MESSAGE_ID: ${{ steps.get_data.outputs.private_message_id }}
+        run: |
+          if [ -n "$URL" ]; then
+            NOTES="Downloaded from Telegram message: $URL"
+          else
+            NOTES="Downloaded from a forwarded Telegram message (chat $PRIVATE_CHAT_ID, message $PRIVATE_MESSAGE_ID)"
+          fi
+          echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+
       - name: Upload to GitHub Release (with heartbeat)
         id: release
         env:
@@ -170,7 +195,7 @@ jobs:
           FILE_PATH: ${{ steps.process.outputs.final_path }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.TAG }}
           RELEASE_TITLE: ${{ steps.release_meta.outputs.TITLE }}
-          RELEASE_NOTES: "Downloaded from Telegram message: ${{ steps.get_data.outputs.telegram_url }}"
+          RELEASE_NOTES: ${{ steps.release_notes.outputs.notes }}
           STAGE: run_upload
         run: python actions/telegram_download/download.py
 
