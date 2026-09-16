@@ -1,0 +1,226 @@
+name: Telegram to GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_url:
+        description: "Telegram public message URL"
+        required: true
+        type: string
+
+  repository_dispatch:
+    types:
+      - telegram_download
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Get Telegram URL
+        id: get_data
+        env:
+          DISPATCH_URL: ${{ github.event.client_payload.telegram_url }}
+          MANUAL_URL: ${{ inputs.telegram_url }}
+        run: |
+          if [ -n "$DISPATCH_URL" ]; then
+            URL="$DISPATCH_URL"
+          else
+            URL="$MANUAL_URL"
+          fi
+
+          if [ -z "$URL" ]; then
+            echo "Telegram URL is empty"
+            exit 1
+          fi
+
+          echo "telegram_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Telegram Started
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
+          STAGE: started
+        run: python actions/telegram_download/download.py
+
+      - name: Install tdl
+        run: |
+          VERSION="0.20.4"
+          URL="https://github.com/iyear/tdl/releases/download/v${VERSION}/tdl_Linux_64bit.tar.gz"
+
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: downloading tdl $VERSION..."
+            curl -fL --retry 3 --retry-delay 2 -o tdl.tar.gz "$URL"
+
+            # Verify it's actually a gzip archive, not a truncated/partial file
+            if gzip -t tdl.tar.gz 2>/dev/null; then
+              echo "Download OK."
+              break
+            fi
+
+            echo "Downloaded archive is corrupt/incomplete, retrying..."
+            rm -f tdl.tar.gz
+            sleep 3
+
+            if [ "$i" -eq 5 ]; then
+              echo "Failed to download a valid tdl archive after 5 attempts."
+              exit 1
+            fi
+          done
+
+          tar -xzf tdl.tar.gz tdl
+          chmod +x tdl
+          sudo mv tdl /usr/local/bin/tdl
+          rm -f tdl.tar.gz
+
+          tdl version
+
+      - name: Restore Telegram session
+        env:
+          TDL_SESSION: ${{ secrets.TDL_SESSION }}
+        run: |
+          mkdir -p "$HOME/tdl-data"
+
+          echo "$TDL_SESSION" | base64 -d \
+            > "$HOME/telegram-session.tdl"
+
+          tdl recover \
+            -f "$HOME/telegram-session.tdl" \
+            -n quickstart \
+            --storage "type=bolt,path=$HOME/tdl-data"
+
+          # Non-secret sanity check: confirm a namespace/session was actually
+          # written to the bolt storage after recover (does not print any
+          # secret values, only file existence/size).
+          echo "Storage dir contents after recover:"
+          ls -lh "$HOME/tdl-data" || true
+
+      - name: Download Telegram file (with live progress)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
+          EXPECTED_SIZE: ${{ github.event.client_payload.expected_size }}
+          TDL_NAMESPACE: quickstart
+          STAGE: run_download
+        run: |
+          export DOWNLOAD_DIR="$HOME/tg-download/downloads"
+          export TDL_STORAGE="type=bolt,path=$HOME/tdl-data"
+          python actions/telegram_download/download.py
+
+      - name: Find downloaded file
+        id: find_file
+        run: |
+          FILE=$(find "$HOME/tg-download/downloads" -type f | head -n 1)
+
+          if [ -z "$FILE" ]; then
+            echo "No downloaded file found."
+            exit 1
+          fi
+
+          echo "FILE=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Downloaded: $FILE"
+
+      - name: Notify Telegram Downloaded
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ steps.find_file.outputs.FILE }}
+          STAGE: downloaded
+        run: python actions/telegram_download/download.py
+
+      - name: Apply rename/zip options
+        id: process
+        env:
+          FILE_PATH: ${{ steps.find_file.outputs.FILE }}
+          CUSTOM_NAME: ${{ github.event.client_payload.custom_name }}
+          ZIP: ${{ github.event.client_payload.zip }}
+          STAGE: process
+        run: python actions/telegram_download/download.py
+
+      - name: Prepare release tag
+        id: release_meta
+        run: |
+          TAG="tg-$(date +%Y%m%d-%H%M%S)"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TITLE=Telegram Download $(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release (with heartbeat)
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.TAG }}
+          RELEASE_TITLE: ${{ steps.release_meta.outputs.TITLE }}
+          RELEASE_NOTES: "Downloaded from Telegram message: ${{ steps.get_data.outputs.telegram_url }}"
+          STAGE: run_upload
+        run: python actions/telegram_download/download.py
+
+      - name: Get Direct Download URL
+        id: direct_url
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.TAG }}
+        run: |
+          sleep 2
+
+          DIRECT_URL=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            --jq '.assets[0].browser_download_url')
+
+          if [ -z "$DIRECT_URL" ] || [ "$DIRECT_URL" = "null" ]; then
+            echo "Could not get direct download URL"
+            exit 1
+          fi
+
+          echo "DIRECT_URL=$DIRECT_URL" >> "$GITHUB_OUTPUT"
+
+          echo "=========================================="
+          echo "Direct download URL:"
+          echo "$DIRECT_URL"
+          echo "=========================================="
+
+      - name: Send Direct Download Link
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          DIRECT_URL: ${{ steps.direct_url.outputs.DIRECT_URL }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+          STAGE: done
+        run: python actions/telegram_download/download.py
+
+      - name: Show Result
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ steps.release_meta.outputs.TAG }}" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Notify Telegram Failed
+        if: ${{ failure() && github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          STAGE: failed
+        run: python actions/telegram_download/download.py
