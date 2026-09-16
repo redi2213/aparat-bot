@@ -41,6 +41,13 @@ from notify import (  # noqa: E402
 )
 
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "").strip()
+# Fallback path for forwards with no public t.me link (see
+# worker/telegram/handlers.js handleForwardedMessage): export this exact
+# message from the bot's own chat with the user by numeric chat id, since
+# `tdl dl -u` has nothing to point at without a link. Empty unless this
+# path is in use.
+PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "").strip()
+PRIVATE_MESSAGE_ID = os.getenv("PRIVATE_MESSAGE_ID", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 STAGE = os.getenv("STAGE", "").strip()  # set by the workflow step calling us
 FILE_PATH = os.getenv("FILE_PATH", "").strip()
@@ -75,7 +82,8 @@ def _write_output(key, value):
 
 
 def stage_started():
-    notify_started(CHAT_ID, f"دانلود پیام تلگرام\n{TELEGRAM_URL}")
+    source_label = TELEGRAM_URL or f"پیام فوروارد‌شده (چت {PRIVATE_CHAT_ID}, پیام {PRIVATE_MESSAGE_ID})"
+    notify_started(CHAT_ID, f"دانلود پیام تلگرام\n{source_label}")
 
 
 def stage_downloaded():
@@ -148,20 +156,35 @@ def _dir_size(path):
 
 def stage_run_download():
     """
-    Launches `tdl dl` in the background and polls the download directory's
-    growing size to drive a live ProgressReporter. If the Worker already
-    told us the expected file size (EXPECTED_SIZE — populated from a
-    forwarded message's media metadata, see worker/telegram/handlers.js),
-    we show a real percentage/ETA; otherwise (e.g. a plain t.me link with
-    no size info available ahead of time) we fall back to bytes-moved and
-    speed only, still a clear "it's alive and moving" signal.
+    Launches `tdl dl` (or, for the private-chat fallback, `tdl chat export`
+    followed by `tdl dl -f`) in the background and polls the download
+    directory's growing size to drive a live ProgressReporter. If the
+    Worker already told us the expected file size (EXPECTED_SIZE —
+    populated from a forwarded message's media metadata, see
+    worker/telegram/handlers.js), we show a real percentage/ETA; otherwise
+    we fall back to bytes-moved and speed only, still a clear "it's alive
+    and moving" signal.
     """
-    if not TELEGRAM_URL or not DOWNLOAD_DIR:
-        print("❌ TELEGRAM_URL یا DOWNLOAD_DIR موجود نیست")
+    if not DOWNLOAD_DIR:
+        print("❌ DOWNLOAD_DIR موجود نیست")
         sys.exit(1)
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+    if PRIVATE_CHAT_ID and PRIVATE_MESSAGE_ID:
+        ok = _run_private_chat_export_and_download()
+    elif TELEGRAM_URL:
+        ok = _run_url_download()
+    else:
+        print("❌ نه TELEGRAM_URL و نه PRIVATE_CHAT_ID/PRIVATE_MESSAGE_ID موجوده")
+        sys.exit(1)
+
+    if not ok:
+        sys.exit(1)
+
+
+def _run_url_download():
+    """The normal path: a public (or private-group) t.me message link."""
     cmd = [
         "tdl", "dl",
         "-n", TDL_NAMESPACE,
@@ -173,10 +196,63 @@ def stage_run_download():
         # want the original filename on disk — no chat/message id prefix.
         "--template", "{{ filenamify .FileName }}",
     ]
-
     log_path = os.path.join(DOWNLOAD_DIR, "..", "tdl-download.log")
-    log_file = open(log_path, "w")
+    return _run_tdl_download_with_progress(cmd, log_path)
 
+
+def _run_private_chat_export_and_download():
+    """
+    The fallback path for forwards with no public link: `tdl chat export`
+    accepts a raw numeric chat id (including this bot's own private chat
+    with the user — TDL_SESSION's account is a participant in it), so we
+    export just this one message to JSON, filtered by message id range,
+    then feed that JSON to `tdl dl -f`.
+    """
+    export_path = os.path.join(DOWNLOAD_DIR, "..", "export.json")
+
+    export_cmd = [
+        "tdl", "chat", "export",
+        "-n", TDL_NAMESPACE,
+        "--storage", TDL_STORAGE,
+        "-c", PRIVATE_CHAT_ID,
+        "-T", "id",
+        "-i", f"{PRIVATE_MESSAGE_ID},{PRIVATE_MESSAGE_ID}",
+        "-o", export_path,
+    ]
+
+    print(f"در حال export پیام {PRIVATE_MESSAGE_ID} از چت {PRIVATE_CHAT_ID}...")
+    export_result = subprocess.run(export_cmd, capture_output=True, text=True)
+
+    if export_result.returncode != 0:
+        print(f"❌ tdl chat export با کد خطای {export_result.returncode} تمام شد.")
+        print(export_result.stdout[-2000:])
+        print(export_result.stderr[-2000:])
+        if CHAT_ID:
+            from notify import notify_failed
+            notify_failed(CHAT_ID, "خواندن پیام از تلگرام ناموفق بود.")
+        return False
+
+    if not os.path.isfile(export_path):
+        print(f"❌ فایل export ساخته نشد: {export_path}")
+        return False
+
+    cmd = [
+        "tdl", "dl",
+        "-n", TDL_NAMESPACE,
+        "--storage", TDL_STORAGE,
+        "-d", DOWNLOAD_DIR,
+        "-f", export_path,
+        "--template", "{{ filenamify .FileName }}",
+    ]
+    log_path = os.path.join(DOWNLOAD_DIR, "..", "tdl-download.log")
+    return _run_tdl_download_with_progress(cmd, log_path)
+
+
+def _run_tdl_download_with_progress(cmd, log_path):
+    """Shared "launch tdl dl in the background, poll disk size, drive
+    ProgressReporter" logic used by both download paths above. Returns True
+    on success, False on failure (after already notifying/logging)."""
+    log_file = open(log_path, "w")
     process = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
 
     reporter = (
@@ -207,13 +283,14 @@ def stage_run_download():
             print(f.read()[-4000:])  # tail, in case the log is huge
         if reporter:
             reporter.stop("❌ دانلود ناموفق بود.")
-        sys.exit(return_code)
+        return False
 
     final_bytes = _dir_size(DOWNLOAD_DIR)
     if reporter:
         reporter.stop(f"✅ دانلود کامل شد.\n📦 حجم: {format_bytes(final_bytes)}")
 
     print(f"✅ دانلود کامل شد ({format_bytes(final_bytes)})")
+    return True
 
 
 def stage_run_upload():

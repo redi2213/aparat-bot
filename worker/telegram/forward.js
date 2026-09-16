@@ -29,31 +29,6 @@
  * @property {string|null} mimeType
  */
 
-/**
- * Builds a t.me/c/<chat_id>/<message_id> link pointing at the forwarded
- * message itself — inside the bot's own chat with the user, not the
- * original source. This works regardless of where the forward originally
- * came from (channel, group, user, even a multi-hop forward where Telegram
- * has discarded the original source info — see detectForward's user/hidden
- * cases) because it only needs two things we always have: this chat's id
- * and this message's id.
- *
- * Why this works: `tdl` authenticates as the *user's own* Telegram account
- * (TDL_SESSION), and that account is a participant in its own chat with
- * the bot — so it already has access to read this message, the same way
- * it can read any other private chat it's part of. No public @username is
- * needed for this path.
- *
- * The numeric chat id format tdl/Telegram links expect (`/c/<id>/...`)
- * strips the `-100` prefix that Bot API uses for supergroup/channel-style
- * chat ids; regular private-chat ids (positive, no prefix) are used as-is.
- */
-export function buildPrivateChatLink(chatId, messageId) {
-  if (!chatId || !messageId) return null;
-  const idStr = String(chatId).replace(/^-100/, "").replace(/^-/, "");
-  return `https://t.me/c/${idStr}/${messageId}`;
-}
-
 export function detectForward(message) {
   const origin = message.forward_origin;
 

@@ -19,7 +19,9 @@ function key(userId) {
 /**
  * @typedef {Object} JobSession
  * @property {"telegram"|"direct_url"|"admin_flow"} source
- * @property {string} link                 - the resolved t.me link or direct http(s) URL (empty for admin_flow)
+ * @property {string} link                 - the resolved t.me link or direct http(s) URL (empty for admin_flow, and empty when using privateChatId/privateMessageId instead — see below)
+ * @property {number|null} [privateChatId]    - set instead of `link` when the forward has no public t.me link: this chat's numeric id, passed to `tdl chat export -c` (see actions/telegram_download)
+ * @property {number|null} [privateMessageId] - the forwarded message's own id within privateChatId, used the same way
  * @property {boolean} rename              - whether the user wants to rename the output file
  * @property {string|null} customName      - the name they typed, once provided
  * @property {boolean} zip                 - whether to zip the output before uploading

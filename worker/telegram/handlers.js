@@ -12,7 +12,7 @@
 // across multiple button taps (Workers have no memory between requests).
 
 import { sendMessage, sendMessageGetId, editMessageText, answerCallbackQuery } from "./client.js";
-import { detectForward, detectMedia, mediaLabelFa, sourceLabelFa, buildPrivateChatLink } from "./forward.js";
+import { detectForward, detectMedia, mediaLabelFa, sourceLabelFa } from "./forward.js";
 import { isDirectUrl, maxAllowedBytes, probeDirectUrl } from "./directUrl.js";
 import { dispatchGithubEvent, getLatestRunId, findRunIdAfterDispatch, cancelWorkflowRun } from "../github/dispatch.js";
 import { createSession, getSession, updateSession, clearSession } from "../state/session.js";
@@ -36,10 +36,13 @@ import {
   userListText,
 } from "./menus.js";
 
-// Matches both public message links (t.me/username/123) and private-chat
-// links (t.me/c/chat_id/message_id) — the latter is what buildPrivateChatLink
-// produces, and also what official Telegram clients give you via "Copy
-// Message Link" inside a private chat/group.
+// Matches both public message links (t.me/username/123) and private
+// group/supergroup/channel message links (t.me/c/chat_id/message_id) —
+// the latter is what official Telegram clients give you via "Copy Message
+// Link" inside a private group/supergroup the user's account is a member
+// of. Note: this format does NOT work for one-on-one private chats (e.g.
+// this bot's own chat with the user) — Telegram has no equivalent public
+// link for those; see handleForwardedMessage's fallback message for that case.
 const TELEGRAM_LINK_RE = /^https?:\/\/t\.me\/(?:c\/\d+\/\d+|[^/\s]+\/\d+)(?:\?.*)?$/;
 
 function isAuthorized(userId, env) {
@@ -151,8 +154,16 @@ async function handleDirectUrlLink(link, env, userId, chatId) {
 
 /**
  * A forwarded message may or may not carry media, and may or may not come
- * from a source we can build a public t.me link for. We report what we
- * found, and only open the job-options menu when we have a usable public link.
+ * from a source we can build a public t.me link for.
+ *
+ * When we can't (private chat, private group, or a channel with no
+ * @username), we don't give up: `tdl chat export -c <chat_id>` accepts a
+ * raw numeric chat id — including this bot's own private chat with the
+ * user — and exports the message as JSON that `tdl dl -f` can then
+ * download from directly. No public link needed, since the account behind
+ * TDL_SESSION is a participant in this exact chat. This is different from
+ * (and replaces) an earlier attempt at building a t.me/c/... link, which
+ * only works for supergroups/channels, not one-on-one private chats.
  */
 async function handleForwardedMessage(message, forward, env, userId, chatId) {
   const media = detectMedia(message);
@@ -170,49 +181,44 @@ async function handleForwardedMessage(message, forward, env, userId, chatId) {
   const sizeLine = media.fileSize ? `\n📦 حجم: ${formatBytes(media.fileSize)}` : "";
   const nameLine = media.fileName ? `\n📄 نام: ${media.fileName}` : "";
 
-  // Prefer the public link when we have one (cheaper/more standard for
-  // tdl). When we don't — e.g. the origin is a user, or a multi-hop
-  // forward where Telegram discarded the original channel info (see
-  // forward.js detectForward) — fall back to a link pointing at the
-  // forwarded message itself, inside this chat. tdl authenticates as the
-  // user's own account (TDL_SESSION), which is a participant in its own
-  // chat with the bot, so it can read this message directly without
-  // needing the original source to be public at all.
-  const link = forward.publicLink || buildPrivateChatLink(chatId, message.message_id);
-  const viaPrivateChat = !forward.publicLink;
+  const sessionBase = {
+    source: "telegram",
+    stage: "menu",
+    expectedSize: media.fileSize || null,
+  };
 
-  if (link) {
+  if (forward.publicLink) {
     await sendMessage(
       env,
       chatId,
       `↪️ پیام فوروارد شده از ${sourceLine}\n` +
         `🎞 نوع: ${mediaLabelFa(media.type)}${nameLine}${sizeLine}\n\n` +
-        (viaPrivateChat
-          ? `🔗 لینک عمومی نداشت، ولی از همین پیام مستقیم دانلود می‌شه.`
-          : `🔗 لینک شناسایی شد.`)
+        `🔗 لینک شناسایی شد.`
     );
 
-    const session = await createSession(env, userId, {
-      source: "telegram",
-      link,
-      stage: "menu",
-      expectedSize: media.fileSize || null,
-    });
+    const session = await createSession(env, userId, { ...sessionBase, link: forward.publicLink });
     await sendMessage(env, chatId, jobOptionsSummaryText(session), jobOptionsKeyboard(session));
     return;
   }
 
-  // Should be unreachable now (buildPrivateChatLink only returns null if
-  // chatId/message_id are missing, which never happens for a real
-  // incoming message) — kept as a safety net rather than assuming.
+  // No public link — fall back to exporting this exact message from the
+  // bot's own chat with the user, by numeric chat id. See the function
+  // docstring for why this works where a t.me/c/ link wouldn't.
   await sendMessage(
     env,
     chatId,
     `↪️ پیام فوروارد شده از ${sourceLine}\n` +
       `🎞 نوع: ${mediaLabelFa(media.type)}${nameLine}${sizeLine}\n\n` +
-      `⚠️ امکان دانلود خودکار این پیام وجود نداره.`,
-    backToMenuKeyboard()
+      `🔗 لینک عمومی نداشت، ولی از همین پیام مستقیم دانلود می‌شه.`
   );
+
+  const session = await createSession(env, userId, {
+    ...sessionBase,
+    link: "", // no message link — the Action uses privateChatId/messageId instead
+    privateChatId: chatId,
+    privateMessageId: message.message_id,
+  });
+  await sendMessage(env, chatId, jobOptionsSummaryText(session), jobOptionsKeyboard(session));
 }
 
 async function handleCustomNameReply(env, userId, chatId, name, session) {
@@ -646,7 +652,12 @@ async function startJob(env, userId, chatId, messageId, session, ctx) {
     session.source === "direct_url"
       ? { source_url: session.link, chat_id: chatId, zip: !!options.zip, custom_name: options.customName || "" }
       : {
-          telegram_url: session.link,
+          telegram_url: session.link || "",
+          // Present only for the private-chat export fallback (see
+          // handleForwardedMessage) — empty strings otherwise, so the
+          // workflow can tell which mode to use.
+          private_chat_id: session.privateChatId || "",
+          private_message_id: session.privateMessageId || "",
           chat_id: chatId,
           zip: !!options.zip,
           custom_name: options.customName || "",
