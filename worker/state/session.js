@@ -33,3 +33,32 @@ export async function createSession(env, userId, session) {
   const full = {
     rename: false,
     customName: null,
+    zip: false,
+    stage: "menu",
+    ...session,
+  };
+  await env.STATE.put(key(userId), JSON.stringify(full), { expirationTtl: SESSION_TTL_SECONDS });
+  return full;
+}
+
+export async function getSession(env, userId) {
+  const raw = await env.STATE.get(key(userId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function updateSession(env, userId, patch) {
+  const current = await getSession(env, userId);
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  await env.STATE.put(key(userId), JSON.stringify(next), { expirationTtl: SESSION_TTL_SECONDS });
+  return next;
+}
+
+export async function clearSession(env, userId) {
+  await env.STATE.delete(key(userId));
+}
