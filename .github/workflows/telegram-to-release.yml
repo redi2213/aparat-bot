@@ -28,7 +28,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests
+          # kurigram: actively maintained Pyrogram fork, same `pyrogram`
+          # import — used only by the no-public-link forward fallback
+          # (_run_bot_mtproto_download in actions/telegram_download) to
+          # log in over MTProto as the bot itself. tgcrypto speeds up
+          # the crypto parts; not strictly required but recommended.
+          pip install kurigram tgcrypto
 
       - name: Get Telegram URL / private chat info
         id: get_data
@@ -122,6 +129,8 @@ jobs:
       - name: Download Telegram file (with live progress)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           TELEGRAM_URL: ${{ steps.get_data.outputs.telegram_url }}
           PRIVATE_CHAT_ID: ${{ steps.get_data.outputs.private_chat_id }}
