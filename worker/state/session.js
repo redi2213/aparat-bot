@@ -20,7 +20,7 @@ function key(userId) {
  * @typedef {Object} JobSession
  * @property {"telegram"|"direct_url"|"admin_flow"} source
  * @property {string} link                 - the resolved t.me link or direct http(s) URL (empty for admin_flow, and empty when using privateChatId/privateMessageId instead — see below)
- * @property {number|null} [privateChatId]    - set instead of `link` when the forward has no public t.me link: this chat's numeric id, passed to `tdl chat export -c` (see actions/telegram_download)
+ * @property {number|null} [privateChatId]    - set instead of `link` when the forward has no public t.me link: this chat's Bot-API id, fetched back over MTProto logged in as the bot itself (see actions/telegram_download/download.py, _run_bot_mtproto_download)
  * @property {number|null} [privateMessageId] - the forwarded message's own id within privateChatId, used the same way
  * @property {boolean} rename              - whether the user wants to rename the output file
  * @property {string|null} customName      - the name they typed, once provided
@@ -33,32 +33,3 @@ export async function createSession(env, userId, session) {
   const full = {
     rename: false,
     customName: null,
-    zip: false,
-    stage: "menu",
-    ...session,
-  };
-  await env.STATE.put(key(userId), JSON.stringify(full), { expirationTtl: SESSION_TTL_SECONDS });
-  return full;
-}
-
-export async function getSession(env, userId) {
-  const raw = await env.STATE.get(key(userId));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-export async function updateSession(env, userId, patch) {
-  const current = await getSession(env, userId);
-  if (!current) return null;
-  const next = { ...current, ...patch };
-  await env.STATE.put(key(userId), JSON.stringify(next), { expirationTtl: SESSION_TTL_SECONDS });
-  return next;
-}
-
-export async function clearSession(env, userId) {
-  await env.STATE.delete(key(userId));
-}
