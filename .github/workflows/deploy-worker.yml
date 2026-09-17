@@ -1,0 +1,44 @@
+name: Deploy Worker to Cloudflare
+
+# Runs automatically whenever the worker code (or its config) changes on
+# the main branch. This exists so deployment doesn't require running
+# `wrangler` locally — useful since `wrangler`/workerd has no Android/
+# Termux build and can't run directly on a phone.
+#
+# You can also trigger it manually from the Actions tab (workflow_dispatch)
+# if you ever need to force a redeploy without changing any files.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "wrangler.toml"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Pushes the app secrets to the Worker on every deploy, so
+          # you never have to run `wrangler secret put` yourself — just
+          # set/update these as GitHub repo secrets and they sync here.
+          secrets: |
+            TELEGRAM_TOKEN
+            USER_ID
+            GH_TOKEN
+            WEBHOOK_SECRET
+            INTERNAL_SECRET
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          USER_ID: ${{ secrets.USER_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}

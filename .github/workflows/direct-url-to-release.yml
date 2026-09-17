@@ -1,0 +1,209 @@
+name: Direct URL to GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Direct http(s) URL to a file"
+        required: true
+        type: string
+
+  repository_dispatch:
+    types:
+      - direct_url_download
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests boto3
+
+      - name: Get source URL
+        id: get_data
+        env:
+          DISPATCH_URL: ${{ github.event.client_payload.source_url }}
+          MANUAL_URL: ${{ inputs.source_url }}
+        run: |
+          if [ -n "$DISPATCH_URL" ]; then
+            URL="$DISPATCH_URL"
+          else
+            URL="$MANUAL_URL"
+          fi
+
+          if [ -z "$URL" ]; then
+            echo "source_url is empty"
+            exit 1
+          fi
+
+          echo "source_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Telegram Started
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          SOURCE_URL: ${{ steps.get_data.outputs.source_url }}
+          STAGE: started
+        run: python actions/direct_url_download/download.py
+
+      - name: Download file (with live progress)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          SOURCE_URL: ${{ steps.get_data.outputs.source_url }}
+          STAGE: run_download
+        run: |
+          export DOWNLOAD_DIR="$HOME/direct-download/downloads"
+          python actions/direct_url_download/download.py
+
+      - name: Find downloaded file
+        id: find_file
+        run: |
+          FILE=$(find "$HOME/direct-download/downloads" -type f | head -n 1)
+
+          if [ -z "$FILE" ]; then
+            echo "No downloaded file found."
+            exit 1
+          fi
+
+          echo "FILE=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Downloaded: $FILE"
+
+      - name: Notify Telegram Downloaded
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ steps.find_file.outputs.FILE }}
+          STAGE: downloaded
+        run: python actions/direct_url_download/download.py
+
+      - name: Apply rename/zip options
+        id: process
+        env:
+          FILE_PATH: ${{ steps.find_file.outputs.FILE }}
+          CUSTOM_NAME: ${{ github.event.client_payload.custom_name }}
+          ZIP: ${{ github.event.client_payload.zip }}
+          STAGE: process
+        run: python actions/direct_url_download/download.py
+
+      # ---------------------------------------------------------------
+      # Storage branch — see the identical block (and its comment) in
+      # telegram-to-release.yml for the full rationale. Kept structurally
+      # in sync between both workflows on purpose.
+
+      - name: Upload to internal storage (ArvanCloud etc)
+        id: internal_upload
+        if: ${{ github.event.client_payload.storage.storage_target == 'internal' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          STORAGE_TARGET: ${{ github.event.client_payload.storage.storage_target }}
+          STORAGE_PROVIDER: ${{ github.event.client_payload.storage.storage_provider }}
+          STORAGE_ACCESS_KEY: ${{ github.event.client_payload.storage.storage_access_key }}
+          STORAGE_SECRET_KEY: ${{ github.event.client_payload.storage.storage_secret_key }}
+          STORAGE_ENDPOINT: ${{ github.event.client_payload.storage.storage_endpoint }}
+          STORAGE_BUCKET: ${{ github.event.client_payload.storage.storage_bucket }}
+          STORAGE_USING_PERSONAL_KEY: ${{ github.event.client_payload.storage.storage_using_personal_key }}
+          STAGE: run_upload_internal
+        run: python actions/direct_url_download/download.py
+
+      - name: Notify Telegram Done (internal storage)
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.storage.storage_target == 'internal' && steps.internal_upload.outputs.direct_url != '' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          DIRECT_URL: ${{ steps.internal_upload.outputs.direct_url }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+          STAGE: done
+        run: python actions/direct_url_download/download.py
+
+      - name: Prepare release tag
+        id: release_meta
+        if: ${{ github.event.client_payload.storage.storage_target != 'internal' }}
+        run: |
+          TAG="url-$(date +%Y%m%d-%H%M%S)"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TITLE=Direct URL Download $(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release (with heartbeat)
+        id: release
+        if: ${{ github.event.client_payload.storage.storage_target != 'internal' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.TAG }}
+          RELEASE_TITLE: ${{ steps.release_meta.outputs.TITLE }}
+          RELEASE_NOTES: "Downloaded from: ${{ steps.get_data.outputs.source_url }}"
+          STAGE: run_upload
+        run: python actions/direct_url_download/download.py
+
+      - name: Get Direct Download URL
+        id: direct_url
+        if: ${{ github.event.client_payload.storage.storage_target != 'internal' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.TAG }}
+        run: |
+          sleep 2
+
+          DIRECT_URL=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            --jq '.assets[0].browser_download_url')
+
+          if [ -z "$DIRECT_URL" ] || [ "$DIRECT_URL" = "null" ]; then
+            echo "Could not get direct download URL"
+            exit 1
+          fi
+
+          echo "DIRECT_URL=$DIRECT_URL" >> "$GITHUB_OUTPUT"
+
+          echo "=========================================="
+          echo "Direct download URL:"
+          echo "$DIRECT_URL"
+          echo "=========================================="
+
+      - name: Send Direct Download Link
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.storage.storage_target != 'internal' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          DIRECT_URL: ${{ steps.direct_url.outputs.DIRECT_URL }}
+          FILE_PATH: ${{ steps.process.outputs.final_path }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+          STAGE: done
+        run: python actions/direct_url_download/download.py
+
+      - name: Show Result
+        if: ${{ github.event.client_payload.storage.storage_target != 'internal' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ steps.release_meta.outputs.TAG }}" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Notify Telegram Failed
+        if: ${{ failure() && github.event_name == 'repository_dispatch' }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          STAGE: failed
+        run: python actions/direct_url_download/download.py
