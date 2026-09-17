@@ -21,6 +21,7 @@ The other stages (started/downloaded/process/done/failed) are simple
 one-shot notifications, same as before.
 """
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -42,12 +43,20 @@ from notify import (  # noqa: E402
 
 TELEGRAM_URL = os.getenv("TELEGRAM_URL", "").strip()
 # Fallback path for forwards with no public t.me link (see
-# worker/telegram/handlers.js handleForwardedMessage): export this exact
-# message from the bot's own chat with the user by numeric chat id, since
-# `tdl dl -u` has nothing to point at without a link. Empty unless this
-# path is in use.
+# worker/telegram/handlers.js handleForwardedMessage): fetch this exact
+# message straight from the bot's own chat with the user, over MTProto,
+# logged in as the bot itself (see _run_bot_mtproto_download). Empty
+# unless this path is in use.
 PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "").strip()
 PRIVATE_MESSAGE_ID = os.getenv("PRIVATE_MESSAGE_ID", "").strip()
+# Needed only for the private-chat fallback below (_run_bot_mtproto_download):
+# logging into Telegram over MTProto *as the bot itself*, instead of via a
+# separate personal-account tdl session. TELEGRAM_API_ID/HASH come from
+# https://my.telegram.org (any personal account, one-time, free) and are
+# just app credentials — they don't log in as that personal account here.
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 STAGE = os.getenv("STAGE", "").strip()  # set by the workflow step calling us
 FILE_PATH = os.getenv("FILE_PATH", "").strip()
@@ -156,14 +165,16 @@ def _dir_size(path):
 
 def stage_run_download():
     """
-    Launches `tdl dl` (or, for the private-chat fallback, `tdl chat export`
-    followed by `tdl dl -f`) in the background and polls the download
-    directory's growing size to drive a live ProgressReporter. If the
-    Worker already told us the expected file size (EXPECTED_SIZE —
-    populated from a forwarded message's media metadata, see
-    worker/telegram/handlers.js), we show a real percentage/ETA; otherwise
-    we fall back to bytes-moved and speed only, still a clear "it's alive
-    and moving" signal.
+    For a public/private-group t.me link: launches `tdl dl` in the
+    background and polls the download directory's growing size to drive
+    a live ProgressReporter. For the no-public-link fallback (forward
+    from a user, a group, or hidden by privacy settings): fetches the
+    message directly over MTProto, logged in as the bot itself — see
+    _run_bot_mtproto_download for why. If the Worker already told us the
+    expected file size (EXPECTED_SIZE — populated from a forwarded
+    message's media metadata, see worker/telegram/handlers.js), we show a
+    real percentage/ETA; otherwise we fall back to bytes-moved and speed
+    only, still a clear "it's alive and moving" signal.
     """
     if not DOWNLOAD_DIR:
         print("❌ DOWNLOAD_DIR موجود نیست")
@@ -172,7 +183,7 @@ def stage_run_download():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     if PRIVATE_CHAT_ID and PRIVATE_MESSAGE_ID:
-        ok = _run_private_chat_export_and_download()
+        ok = _run_bot_mtproto_download()
     elif TELEGRAM_URL:
         ok = _run_url_download()
     else:
@@ -200,52 +211,113 @@ def _run_url_download():
     return _run_tdl_download_with_progress(cmd, log_path)
 
 
-def _run_private_chat_export_and_download():
+def _run_bot_mtproto_download():
     """
-    The fallback path for forwards with no public link: `tdl chat export`
-    accepts a raw numeric chat id (including this bot's own private chat
-    with the user — TDL_SESSION's account is a participant in it), so we
-    export just this one message to JSON, filtered by message id range,
-    then feed that JSON to `tdl dl -f`.
+    The fallback path for forwards with no public link (from a user, a
+    group, or hidden by the sender's privacy settings — anything
+    worker/telegram/forward.js couldn't build a t.me link for).
+
+    Why the old `tdl chat export -c <chat_id>` approach here always found
+    nothing (see handoff-forward-issue.md): `tdl` connects over MTProto as
+    a *separate personal Telegram account* (TDL_SESSION). PRIVATE_CHAT_ID
+    is the Bot API's id for this chat, which for a private bot<->user chat
+    is just the human's own numeric user id — that id does not identify
+    "the conversation with the bot" from the personal account's own point
+    of view (if it resolves to anything there, it's that account's own
+    Saved Messages). And even given the right chat, Telegram assigns
+    message ids for private/basic-group chats from a counter that is
+    scoped *per account*, not per conversation — so the id the Bot API
+    reports for this message is simply a different number than the same
+    message has in the personal account's own numbering. Neither piece
+    can be bridged from outside; that's why `tdl chat export` kept
+    finishing with exit code 0 but an empty/media-less result.
+
+    Fix: don't use a separate account at all. Connect over MTProto *as
+    the bot itself* (bot_token login, no personal account involved). That
+    is the exact identity the Bot API webhook already talks to, so
+    PRIVATE_CHAT_ID/PRIVATE_MESSAGE_ID from the webhook are valid as-is —
+    the bot received this exact message in this exact chat, so it can
+    always look it up directly. As a bonus, MTProto has no ~20MB download
+    ceiling — that limit belongs only to the api.telegram.org Bot API
+    HTTP bridge — so this also lifts the old size limit on this path.
+
+    Requires TELEGRAM_API_ID/TELEGRAM_API_HASH (free, one-time, from
+    https://my.telegram.org — any personal account can generate these,
+    they're just app credentials, not a login) in addition to the
+    existing TELEGRAM_TOKEN. Uses Kurigram (`pip install kurigram
+    tgcrypto`), an actively maintained drop-in fork of Pyrogram — same
+    `from pyrogram import ...` API.
     """
-    export_path = os.path.join(DOWNLOAD_DIR, "..", "export.json")
-
-    export_cmd = [
-        "tdl", "chat", "export",
-        "-n", TDL_NAMESPACE,
-        "--storage", TDL_STORAGE,
-        "-c", PRIVATE_CHAT_ID,
-        "-T", "id",
-        "-i", f"{PRIVATE_MESSAGE_ID},{PRIVATE_MESSAGE_ID}",
-        "-o", export_path,
-    ]
-
-    print(f"در حال export پیام {PRIVATE_MESSAGE_ID} از چت {PRIVATE_CHAT_ID}...")
-    export_result = subprocess.run(export_cmd, capture_output=True, text=True)
-
-    if export_result.returncode != 0:
-        print(f"❌ tdl chat export با کد خطای {export_result.returncode} تمام شد.")
-        print(export_result.stdout[-2000:])
-        print(export_result.stderr[-2000:])
+    if not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_TOKEN):
+        print("❌ TELEGRAM_API_ID/TELEGRAM_API_HASH/TELEGRAM_TOKEN موجود نیست")
         if CHAT_ID:
             from notify import notify_failed
-            notify_failed(CHAT_ID, "خواندن پیام از تلگرام ناموفق بود.")
+            notify_failed(CHAT_ID, "تنظیمات لازم برای دانلود این نوع فوروارد کامل نیست (TELEGRAM_API_ID/HASH).")
         return False
 
-    if not os.path.isfile(export_path):
-        print(f"❌ فایل export ساخته نشد: {export_path}")
+    try:
+        chat_id = int(PRIVATE_CHAT_ID)
+        message_id = int(PRIVATE_MESSAGE_ID)
+    except ValueError:
+        print(f"❌ chat_id/message_id نامعتبر: '{PRIVATE_CHAT_ID}' / '{PRIVATE_MESSAGE_ID}'")
         return False
 
-    cmd = [
-        "tdl", "dl",
-        "-n", TDL_NAMESPACE,
-        "--storage", TDL_STORAGE,
-        "-d", DOWNLOAD_DIR,
-        "-f", export_path,
-        "--template", "{{ filenamify .FileName }}",
-    ]
-    log_path = os.path.join(DOWNLOAD_DIR, "..", "tdl-download.log")
-    return _run_tdl_download_with_progress(cmd, log_path)
+    print(f"در حال دریافت پیام {message_id} از چت {chat_id} به‌عنوان خود ربات (MTProto)...")
+
+    reporter = (
+        ProgressReporter(CHAT_ID, label="در حال دانلود از تلگرام", total_bytes=EXPECTED_SIZE)
+        if CHAT_ID
+        else None
+    )
+
+    def on_progress(current, _total):
+        # Pyrogram/Kurigram calls this off the event loop for sync
+        # callbacks, so the blocking notify.py HTTP calls inside tick()
+        # are fine here — this is the only thing running at the time.
+        if reporter:
+            reporter.tick(current)
+
+    async def _do_download():
+        from pyrogram import Client  # Kurigram ships as the `pyrogram` package
+
+        app = Client(
+            "bot_dl",
+            api_id=int(TELEGRAM_API_ID),
+            api_hash=TELEGRAM_API_HASH,
+            bot_token=TELEGRAM_TOKEN,
+            in_memory=True,  # bot-token login needs no persisted session file
+        )
+        async with app:
+            msg = await app.get_messages(chat_id, message_id)
+            if not msg or getattr(msg, "empty", False) or not msg.media:
+                print(f"❌ پیام {message_id} در چت {chat_id} رسانه‌ای نداشت یا در دسترس نبود")
+                return None
+            return await app.download_media(
+                msg,
+                file_name=DOWNLOAD_DIR + os.sep,
+                progress=on_progress,
+            )
+
+    if reporter:
+        reporter.start()
+
+    try:
+        result_path = asyncio.run(_do_download())
+    except Exception as e:
+        print(f"❌ خطا در دانلود مستقیم MTProto: {e}")
+        result_path = None
+
+    if not result_path or not os.path.isfile(result_path):
+        if reporter:
+            reporter.stop("❌ دانلود ناموفق بود.")
+        print("❌ فایلی دانلود نشد.")
+        return False
+
+    final_bytes = os.path.getsize(result_path)
+    if reporter:
+        reporter.stop(f"✅ دانلود کامل شد.\n📦 حجم: {format_bytes(final_bytes)}")
+    print(f"✅ دانلود کامل شد ({format_bytes(final_bytes)})")
+    return True
 
 
 def _run_tdl_download_with_progress(cmd, log_path):
@@ -373,3 +445,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
     STAGES[STAGE]()
+      
