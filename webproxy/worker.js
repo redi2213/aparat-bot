@@ -45,7 +45,7 @@ async function handle(request, env) {
   if (p === '/go') return redirect(prox(normalize(url.searchParams.get('q') || '')));
   if (p === '/p') {
     const u = url.searchParams.get('u');
-    return u ? proxy(u, request) : text('Missing u', 400);
+    return u ? proxy(unwrap(u), request) : text('Missing u', 400);
   }
   if (p === '/f') {
     const u = url.searchParams.get('__u');
@@ -112,7 +112,8 @@ function rewriter(pageUrl) {
   };
   const attr = (name) => ({
     element(el) {
-      const a = abs(el.getAttribute(name));
+      let a = abs(el.getAttribute(name));
+      if (a && name === 'href') a = unwrap(a);
       if (a) el.setAttribute(name, prox(a));
       el.removeAttribute('integrity');
     },
@@ -168,6 +169,19 @@ function rewriteCss(css, base) {
   css = css.replace(/url\(\s*([^)]*?)\s*\)/gi, (m, u) => { const a = fix(u); return a ? 'url("' + a + '")' : m; });
   css = css.replace(/@import\s+["']([^"']+)["']/gi, (m, u) => { const a = fix(u); return a ? '@import "' + a + '"' : m; });
   return css;
+}
+
+// Search engines wrap result links in their own redirect; go straight to the real site.
+function unwrap(u) {
+  try {
+    const x = new URL(u);
+    const host = x.hostname.toLowerCase();
+    if (host.endsWith('duckduckgo.com') && x.pathname.indexOf('/l/') === 0) {
+      const real = x.searchParams.get('uddg');
+      if (real) return real;
+    }
+  } catch (e) { /* keep original */ }
+  return u;
 }
 
 function normalize(q) {
