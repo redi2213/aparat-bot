@@ -1,0 +1,54 @@
+name: Zip Release Asset
+
+# Started from the YT Bridge app (Release History > Telegram bot files > Zip).
+# Downloads the asset through the API with the repo token (works when the repo is private),
+# zips it and puts the zip back into the same release instead of the original file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_url:
+        description: 'Direct download URL of the existing release asset (not used; the API is used)'
+        required: false
+      asset_name:
+        description: 'Current filename of the asset'
+        required: true
+      release_id:
+        description: 'Release id the asset belongs to'
+        required: true
+      job_id:
+        description: 'Unique id used to find this run'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  rezip:
+    runs-on: ubuntu-latest
+    name: ${{ github.event.inputs.job_id }}
+    steps:
+      - name: Download the asset, zip it, replace it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_NAME: ${{ github.event.inputs.asset_name }}
+          RELEASE_ID: ${{ github.event.inputs.release_id }}
+        run: |
+          set -euo pipefail
+          REL=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")
+          TAG=$(echo "$REL" | jq -r '.tag_name')
+          ASSET_ID=$(echo "$REL" | jq -r --arg n "$ASSET_NAME" '[.assets[] | select(.name==$n)][0].id // empty')
+          if [ -z "$ASSET_ID" ]; then
+            echo "Asset not found in release $RELEASE_ID: $ASSET_NAME"
+            exit 1
+          fi
+
+          mkdir work
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "work/$ASSET_NAME"
+
+          ZIP_NAME="${ASSET_NAME%.*}.zip"
+          (cd work && zip -r "../$ZIP_NAME" "$ASSET_NAME")
+
+          gh release upload "$TAG" "$ZIP_NAME" --clobber
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
