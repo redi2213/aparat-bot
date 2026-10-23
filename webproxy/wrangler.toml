@@ -1,0 +1,5 @@
+# Separate Worker from the bot: deployed by .github/workflows/deploy-webproxy.yml
+name = "web-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+workers_dev = true
