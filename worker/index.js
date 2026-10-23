@@ -2,6 +2,7 @@
 //
 // Cloudflare Worker entry point. Handles two kinds of incoming requests:
 //   1. POST /            - Telegram webhook -> GitHub repository_dispatch
+//   0. GET /dl/<tag>/<name>?s=<sig> and POST /app/sign - signed file links (see download.js)
 //   2. POST /internal/history-add - called by GitHub Actions after a job
 //      finishes successfully, to record it in the user's history. This
 //      exists because Actions has no direct access to Cloudflare KV; this
@@ -37,10 +38,19 @@
 import { handleMessage, handleCallback } from "./telegram/handlers.js";
 import { addHistoryEntry } from "./state/history.js";
 import { isAdmin, recordUsage } from "./state/users.js";
+import { handleDownload, handleAppSign } from "./download.js";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // Signed download links of the (private) repo's release files, and their signing for the YT Bridge app.
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/dl/")) {
+      return handleDownload(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/app/sign") {
+      return handleAppSign(request, env);
+    }
 
     if (request.method === "POST" && url.pathname === "/internal/history-add") {
       return handleHistoryAdd(request, env);

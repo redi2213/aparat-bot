@@ -258,16 +258,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release_meta.outputs.TAG }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
         run: |
           sleep 2
 
-          DIRECT_URL=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-            --jq '.assets[0].browser_download_url')
+          REL=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          DIRECT_URL=$(echo "$REL" | jq -r '.assets[0].browser_download_url')
+          ASSET_NAME=$(echo "$REL" | jq -r '.assets[0].name')
 
           if [ -z "$DIRECT_URL" ] || [ "$DIRECT_URL" = "null" ]; then
             echo "Could not get direct download URL"
             exit 1
+          fi
+
+          # The repo is private: GitHub's own link does not work without a login, so the
+          # link sent to the user goes through the Worker (/dl/..., signed with INTERNAL_SECRET).
+          if [ -n "${WORKER_URL:-}" ] && [ -n "${INTERNAL_SECRET:-}" ] && [ "$ASSET_NAME" != "null" ]; then
+            SIG=$(printf '%s' "${TAG}/${ASSET_NAME}" | openssl dgst -sha256 -hmac "$INTERNAL_SECRET" -hex | awk '{print $NF}' | cut -c1-32)
+            ENC=$(python3 -c 'import sys, urllib.parse as u; print(u.quote(sys.argv[1], safe=""))' "$ASSET_NAME")
+            DIRECT_URL="${WORKER_URL%/}/dl/${TAG}/${ENC}?s=${SIG}"
           fi
 
           echo "DIRECT_URL=$DIRECT_URL" >> "$GITHUB_OUTPUT"
