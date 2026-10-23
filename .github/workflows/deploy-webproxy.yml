@@ -1,0 +1,49 @@
+name: Deploy Web Proxy Worker
+
+# Deploys webproxy/worker.js as a separate Worker named "web-proxy".
+# Needs the same repo secrets as deploy-worker.yml (CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID)
+# plus one new secret: PROXY_KEY (a long random password, at least 12 characters).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webproxy/**"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PROXY_KEY
+        env:
+          PROXY_KEY: ${{ secrets.PROXY_KEY }}
+        run: |
+          if [ -z "$PROXY_KEY" ]; then
+            echo "::error::Add a repo secret named PROXY_KEY first (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          if [ ${#PROXY_KEY} -lt 12 ]; then
+            echo "::error::PROXY_KEY must be at least 12 characters."
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare Workers
+        id: deploy
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: webproxy
+          secrets: |
+            PROXY_KEY
+        env:
+          PROXY_KEY: ${{ secrets.PROXY_KEY }}
+
+      - name: Print address
+        run: |
+          echo "Worker address: ${{ steps.deploy.outputs.deployment-url }}"
+          echo "### Web proxy deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Address: ${{ steps.deploy.outputs.deployment-url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "First visit: <address>/?key=YOUR_PROXY_KEY" >> "$GITHUB_STEP_SUMMARY"
