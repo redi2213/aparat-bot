@@ -1,9 +1,11 @@
 // Personal web proxy for Cloudflare Workers.
 // Needs a secret named PROXY_KEY. Open https://<worker>.workers.dev/?key=<PROXY_KEY> once to log in.
-// Cookies are never forwarded to or accepted from target sites, so logins on target sites will not work.
+// Cookies of target sites are kept in HttpOnly cookies named ck__<domain>__<name>, and are only sent back to that domain.
+// Cookies that a site's own JavaScript sets (document.cookie) are not supported.
 
 const AUTH = 'pk';
 const BASE = 'pb';
+const JAR = 'ck__';
 const DROP = ['content-security-policy', 'content-security-policy-report-only', 'x-frame-options', 'set-cookie', 'content-encoding', 'content-length', 'strict-transport-security', 'report-to', 'nel', 'cross-origin-opener-policy', 'cross-origin-embedder-policy', 'cross-origin-resource-policy', 'permissions-policy'];
 
 const HOME = `<!doctype html><html lang='fa' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Web</title><style>body{font-family:system-ui,sans-serif;max-width:560px;margin:12vh auto;padding:0 16px;background:#0f1115;color:#e8e8e8}input{width:100%;box-sizing:border-box;padding:14px;font-size:16px;border-radius:10px;border:1px solid #333;background:#1a1d24;color:inherit;direction:ltr}button{margin-top:10px;width:100%;padding:14px;font-size:16px;border:0;border-radius:10px;background:#2ea043;color:#fff}</style></head><body><h2>وب‌پروکسی</h2><form action='/go' method='get'><input name='q' placeholder='example.com یا عبارت جستجو' autofocus autocomplete='off' autocapitalize='off'><button>برو</button></form></body></html>`;
@@ -67,7 +69,8 @@ async function proxy(target, request) {
   let t;
   try { t = new URL(target); } catch (e) { return text('Bad URL', 400); }
   if (t.protocol !== 'http:' && t.protocol !== 'https:') return text('Only http/https', 400);
-  if (blocked(t.hostname, new URL(request.url).hostname)) return text('Blocked', 403);
+  const host = t.hostname.toLowerCase();
+  if (blocked(host, new URL(request.url).hostname)) return text('Blocked', 403);
   const method = request.method;
   if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') return text('Method not allowed', 405);
 
@@ -76,6 +79,11 @@ async function proxy(target, request) {
     const v = request.headers.get(n);
     if (v) h.set(n, v);
   }
+  h.set('referer', t.origin + '/');
+  if (method === 'POST') h.set('origin', t.origin);
+  const ck = cookiesFor(host, parseCookies(request.headers.get('cookie') || ''));
+  if (ck) h.set('cookie', ck);
+
   const init = { method: method, headers: h, redirect: 'manual' };
   if (method === 'POST') init.body = request.body;
   const resp = await fetch(t.href, init);
@@ -83,13 +91,16 @@ async function proxy(target, request) {
   if ([301, 302, 303, 307, 308].includes(resp.status) && resp.headers.get('location')) {
     let loc;
     try { loc = new URL(resp.headers.get('location'), t).href; } catch (e) { return text('Bad redirect', 502); }
-    return new Response(null, { status: resp.status, headers: { location: prox(loc), 'cache-control': 'no-store' } });
+    const rh = new Headers({ location: prox(loc), 'cache-control': 'no-store' });
+    addJar(rh, resp, host);
+    return new Response(null, { status: resp.status, headers: rh });
   }
 
   const out = new Headers(resp.headers);
   for (const n of DROP) out.delete(n);
   out.set('x-robots-tag', 'noindex');
   out.set('referrer-policy', 'no-referrer');
+  addJar(out, resp, host);
   const type = (out.get('content-type') || '').toLowerCase();
 
   if (type.includes('text/html')) {
@@ -101,6 +112,64 @@ async function proxy(target, request) {
   }
   return new Response(resp.body, { status: resp.status, headers: out });
 }
+
+// ---- cookie jar ----
+
+function encName(n) {
+  return encodeURIComponent(n).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+// Cookie header for the target host, built from stored cookies of that domain (and its parents)
+function cookiesFor(host, cookies) {
+  const parts = [];
+  for (const k of Object.keys(cookies)) {
+    if (k.indexOf(JAR) !== 0) continue;
+    const rest = k.slice(JAR.length);
+    const i = rest.indexOf('__');
+    if (i < 1) continue;
+    const dom = rest.slice(0, i);
+    if (host === dom || host.endsWith('.' + dom)) parts.push(dec(rest.slice(i + 2)) + '=' + cookies[k]);
+  }
+  return parts.join('; ');
+}
+
+// Turn one Set-Cookie from the target into a stored, HttpOnly cookie of ours
+function jarSet(sc, host) {
+  const parts = sc.split(';');
+  const nv = parts[0];
+  const eq = nv.indexOf('=');
+  if (eq < 1) return null;
+  const name = nv.slice(0, eq).trim();
+  const value = nv.slice(eq + 1).trim();
+  let dom = host, maxAge = null, expires = null;
+  for (const a of parts.slice(1)) {
+    const j = a.indexOf('=');
+    const k = (j < 0 ? a : a.slice(0, j)).trim().toLowerCase();
+    const v = j < 0 ? '' : a.slice(j + 1).trim();
+    if (k === 'domain' && v) {
+      const d = v.replace(/^[.]/, '').toLowerCase();
+      if (host === d || host.endsWith('.' + d)) dom = d;
+    } else if (k === 'max-age') {
+      maxAge = v;
+    } else if (k === 'expires') {
+      expires = v;
+    }
+  }
+  let c = JAR + dom + '__' + encName(name) + '=' + value + '; Path=/; Secure; HttpOnly; SameSite=Lax';
+  if (maxAge !== null) c += '; Max-Age=' + maxAge;
+  else if (expires) c += '; Expires=' + expires;
+  return c;
+}
+
+function addJar(headers, resp, host) {
+  const list = typeof resp.headers.getSetCookie === 'function' ? resp.headers.getSetCookie() : [];
+  for (const sc of list) {
+    const c = jarSet(sc, host);
+    if (c) headers.append('set-cookie', c);
+  }
+}
+
+// ---- HTML / CSS rewriting ----
 
 function rewriter(pageUrl) {
   let base = pageUrl;
