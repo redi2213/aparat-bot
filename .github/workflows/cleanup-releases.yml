@@ -1,0 +1,32 @@
+name: Cleanup old releases
+
+# Deletes Telegram bot files 7 days after they were uploaded (a file extended in the YT Bridge
+# app waits until its new date). Rules: scripts/cleanup_releases.py + scripts/retention_core.py
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'true = only list what would be deleted'
+        required: false
+        default: 'false'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - name: Delete old bot files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python3 scripts/cleanup_releases.py
