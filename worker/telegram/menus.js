@@ -7,6 +7,7 @@
 // and future ones) without hunting through handler code.
 
 import { getProvider } from "../state/storageProviders.js";
+import { detectStorage, storageLabel } from "../storage/detect.js";
 
 export const MAIN_MENU_TEXT =
   "👋 سلام! به ربات دانلود تلگرام خوش اومدید.\n\n" +
@@ -180,7 +181,8 @@ export function historyListText(entries, { isAdminView, scopeLabel } = {}) {
     const date = new Date(e.createdAt).toLocaleDateString("fa-IR");
     const sizeLabel = e.fileSize ? ` — ${formatBytesShort(e.fileSize)}` : "";
     const ownerLabel = isAdminView && e.ownerId ? ` (کاربر ${e.ownerId})` : "";
-    lines.push(`${i + 1}. ${icon} ${e.fileName || "بدون‌نام"}${sizeLabel} — ${date}${ownerLabel}`);
+    const where = storageLabel(detectStorage(e));
+    lines.push(`${i + 1}. ${icon} ${e.fileName || "بدون‌نام"}${sizeLabel} — ${date} — ${where}${ownerLabel}`);
   });
 
   return lines.join("\n");
@@ -197,10 +199,107 @@ export function historyListText(entries, { isAdminView, scopeLabel } = {}) {
 export function historyKeyboard(entries, { backCallback } = {}) {
   const rows = entries.map((e, i) => [
     { text: `🔗 ${i + 1}`, callback_data: `hist_link_${e.id}` },
-    { text: "🗑", callback_data: `hist_del_${e.id}` },
+    { text: `🗑 ${i + 1}`, callback_data: `hist_del_${e.id}` },
   ]);
+  rows.push([{ text: "🧹 خالی کردن مخزن", callback_data: "hist_empty" }]);
   rows.push([{ text: "🔙 بازگشت", callback_data: backCallback || "menu_history" }]);
   return { inline_keyboard: rows };
+}
+
+// ---- real deletion (file removed from GitHub / Arvan, not just the list) ----
+
+export function historyDeleteConfirmText(entry) {
+  return (
+    "🗑 این فایل برای همیشه حذف بشه؟\n\n" +
+    `📄 ${entry.fileName || "بدون‌نام"}\n` +
+    `📍 محل ذخیره: ${storageLabel(detectStorage(entry))}\n\n` +
+    "فایل واقعاً از مخزن پاک می‌شه و لینکش دیگه کار نمی‌کنه."
+  );
+}
+
+export function historyDeleteConfirmKeyboard(entryId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ آره، حذف کن", callback_data: `hist_delok_${entryId}` },
+        { text: "❌ انصراف", callback_data: "hist_back" },
+      ],
+    ],
+  };
+}
+
+export function historyDeleteFailedText(entry, detail) {
+  return (
+    `❌ حذف از ${storageLabel(detectStorage(entry))} انجام نشد.\n\n` +
+    `📄 ${entry.fileName || "بدون‌نام"}\n` +
+    `علت: ${detail || "نامشخص"}\n\n` +
+    "فایل هنوز در مخزن هست و از تاریخچه هم حذف نشده."
+  );
+}
+
+export function historyDeleteFailedKeyboard(entryId) {
+  return {
+    inline_keyboard: [
+      [{ text: "🔁 تلاش دوباره", callback_data: `hist_delok_${entryId}` }],
+      [{ text: "🗂 فقط از تاریخچه حذف کن", callback_data: `hist_delforce_${entryId}` }],
+      [{ text: "🔙 بازگشت", callback_data: "hist_back" }],
+    ],
+  };
+}
+
+// ---- empty storage ----
+
+const EMPTY_TARGET_FA = {
+  gh: "🌍 GitHub (همه‌ی ریلیزهای ربات)",
+  arvan: "🇮🇷 آروان (کل فایل‌های باکت)",
+  all: "🌍 GitHub + 🇮🇷 آروان",
+  mine: "همه‌ی فایل‌های تاریخچه‌ی من",
+};
+
+export function emptyStorageText({ isAdmin }) {
+  return isAdmin
+    ? "🧹 کدوم مخزن خالی بشه؟\n\n" +
+        "🌍 GitHub: فقط ریلیزهای ساخته‌شده توسط ربات (تگ tg-… و url-…) پاک می‌شن؛ بقیه‌ی ریلیزهای مخزن دست‌نخورده می‌مونن.\n" +
+        "🇮🇷 آروان: تمام فایل‌های باکتِ کلید ادمین پاک می‌شن."
+    : "🧹 همه‌ی فایل‌های موجود در تاریخچه‌ی شما (از GitHub یا آروان) واقعاً حذف بشن؟";
+}
+
+export function emptyStorageKeyboard({ isAdmin }) {
+  if (!isAdmin) {
+    return {
+      inline_keyboard: [
+        [{ text: "🧹 بله، همه‌ی فایل‌هام پاک بشه", callback_data: "hist_emptyok_mine" }],
+        [{ text: "🔙 بازگشت", callback_data: "hist_back" }],
+      ],
+    };
+  }
+  return {
+    inline_keyboard: [
+      [{ text: EMPTY_TARGET_FA.gh, callback_data: "hist_empty_gh" }],
+      [{ text: EMPTY_TARGET_FA.arvan, callback_data: "hist_empty_arvan" }],
+      [{ text: EMPTY_TARGET_FA.all, callback_data: "hist_empty_all" }],
+      [{ text: "🔙 بازگشت", callback_data: "hist_back" }],
+    ],
+  };
+}
+
+export function emptyConfirmText(target) {
+  return (
+    "⚠️ مطمئنید؟\n\n" +
+    `هدف: ${EMPTY_TARGET_FA[target] || target}\n\n` +
+    "این کار برگشت‌ناپذیره. بعد از اتمام، آیتم‌های مربوط از تاریخچه‌ی همه‌ی کاربرها هم حذف می‌شن."
+  );
+}
+
+export function emptyConfirmKeyboard(target) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ آره، خالی کن", callback_data: `hist_emptyok_${target}` },
+        { text: "❌ انصراف", callback_data: "hist_back" },
+      ],
+    ],
+  };
 }
 
 function formatBytesShort(bytes) {

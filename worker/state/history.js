@@ -16,6 +16,8 @@
 // This module only stores/retrieves; it doesn't decide who's allowed to
 // see what.
 
+import { detectStorage } from "../storage/detect.js";
+
 const HISTORY_LIMIT = 20;
 
 function key(userId) {
@@ -28,6 +30,8 @@ function key(userId) {
  * @property {"telegram"|"direct_url"} source
  * @property {string} fileName      - display name shown in the list
  * @property {number|null} fileSize - bytes, if known
+ * @property {"github"|"arvan"=} storage - where the file physically lives (absent on old entries; see storage/detect.js)
+ * @property {boolean=} usedPersonalKey - Arvan upload made with the user's own key (decides which key can delete it)
  * @property {string} link          - the direct download / result link
  * @property {number} createdAt     - epoch ms
  */
@@ -73,6 +77,20 @@ export async function removeHistoryEntry(env, userId, entryId) {
 export async function getHistoryEntry(env, userId, entryId) {
   const list = await getHistory(env, userId);
   return list.find((e) => e.id === entryId) || null;
+}
+
+/**
+ * Drops every entry stored in one of the given storages (used after the
+ * "empty storage" job has wiped that storage for real). Returns how many
+ * entries were removed.
+ */
+export async function purgeHistoryByStorage(env, userId, storages) {
+  const list = await getHistory(env, userId);
+  const next = list.filter((e) => !storages.includes(detectStorage(e)));
+  if (next.length === list.length) return 0;
+  if (next.length === 0) await env.STATE.delete(key(userId));
+  else await env.STATE.put(key(userId), JSON.stringify(next));
+  return list.length - next.length;
 }
 
 export async function clearHistory(env, userId) {

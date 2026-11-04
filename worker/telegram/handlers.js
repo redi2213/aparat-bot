@@ -41,6 +41,8 @@ import {
   checkQuota,
 } from "../state/users.js";
 import { getHistory, removeHistoryEntry, getHistoryEntry } from "../state/history.js";
+import { deleteFromStorage } from "../storage/delete.js";
+import { detectStorage, storageLabel } from "../storage/detect.js";
 import { getProvider, DEFAULT_INTERNAL_PROVIDER_ID } from "../state/storageProviders.js";
 import {
   MAIN_MENU_TEXT,
@@ -55,6 +57,14 @@ import {
   historyScopeKeyboard,
   historyListText,
   historyKeyboard,
+  historyDeleteConfirmText,
+  historyDeleteConfirmKeyboard,
+  historyDeleteFailedText,
+  historyDeleteFailedKeyboard,
+  emptyStorageText,
+  emptyStorageKeyboard,
+  emptyConfirmText,
+  emptyConfirmKeyboard,
   settingsText,
   settingsKeyboard,
   userListText,
@@ -499,8 +509,46 @@ export async function handleCallback(callback, env, ctx) {
     return;
   }
 
+  if (data === "hist_back") {
+    await answerCallbackQuery(env, callback.id);
+    await showHistoryAgain(env, userId, chatId, messageId);
+    return;
+  }
+
   if (data.startsWith("hist_del_")) {
-    await handleHistoryDelete(env, callback, userId, chatId, messageId, data);
+    await handleHistoryDeleteAsk(env, callback, userId, chatId, messageId, data);
+    return;
+  }
+
+  if (data.startsWith("hist_delok_") || data.startsWith("hist_delforce_")) {
+    await handleHistoryDeleteDo(env, callback, userId, chatId, messageId, data);
+    return;
+  }
+
+  if (data === "hist_empty") {
+    await answerCallbackQuery(env, callback.id);
+    await editMessageText(env, chatId, messageId, emptyStorageText({ isAdmin: isAdmin(userId, env) }), emptyStorageKeyboard({ isAdmin: isAdmin(userId, env) }));
+    return;
+  }
+
+  if (data === "hist_empty_gh" || data === "hist_empty_arvan" || data === "hist_empty_all") {
+    if (!isAdmin(userId, env)) {
+      await answerCallbackQuery(env, callback.id, "❌ فقط ادمین", true);
+      return;
+    }
+    await answerCallbackQuery(env, callback.id);
+    const target = data.replace("hist_empty_", "");
+    await editMessageText(env, chatId, messageId, emptyConfirmText(target), emptyConfirmKeyboard(target));
+    return;
+  }
+
+  if (data === "hist_emptyok_mine") {
+    await handleEmptyMine(env, callback, userId, chatId, messageId);
+    return;
+  }
+
+  if (data === "hist_emptyok_gh" || data === "hist_emptyok_arvan" || data === "hist_emptyok_all") {
+    await handleEmptyAdmin(env, callback, userId, chatId, messageId, data.replace("hist_emptyok_", ""));
     return;
   }
 
@@ -726,31 +774,160 @@ async function handleHistoryLink(env, callback, userId, chatId, messageId, data)
 }
 
 /**
- * Deletion works from any scope an admin is looking at — including another
- * user's history — which is the point: if a user sends something that
- * shouldn't be there, the admin can remove it from here directly, without
- * needing separate tooling.
+ * Finds a history entry across the user ids visible in the current scope.
+ * @returns {Promise<{ownerId: string, entry: object}|null>}
  */
-async function handleHistoryDelete(env, callback, userId, chatId, messageId, data) {
-  const entryId = data.replace("hist_del_", "");
+async function findHistoryEntry(env, userId, entryId) {
   const candidateIds = await resolveHistoryLookupIds(env, userId);
-
-  let removed = false;
   for (const id of candidateIds) {
-    removed = await removeHistoryEntry(env, id, entryId);
-    if (removed) break;
+    const entry = await getHistoryEntry(env, id, entryId);
+    if (entry) return { ownerId: String(id), entry };
   }
+  return null;
+}
 
-  if (!removed) {
-    await answerCallbackQuery(env, callback.id, "❌ پیدا نشد", true);
-    return;
-  }
-
-  await answerCallbackQuery(env, callback.id, "🗑 حذف شد");
-
+async function showHistoryAgain(env, userId, chatId, messageId) {
   const session = await getSession(env, userId);
   const scope = (session && session.historyScope) || { kind: "self" };
   await showHistoryForScope(env, userId, chatId, messageId, scope);
+}
+
+/**
+ * Step 1 of deletion: ask for confirmation. Works from any scope an admin
+ * is looking at — including another user's history — so an admin can remove
+ * an inappropriate file straight from there.
+ */
+async function handleHistoryDeleteAsk(env, callback, userId, chatId, messageId, data) {
+  const entryId = data.replace("hist_del_", "");
+  const found = await findHistoryEntry(env, userId, entryId);
+  if (!found) {
+    await answerCallbackQuery(env, callback.id, "❌ پیدا نشد", true);
+    return;
+  }
+  await answerCallbackQuery(env, callback.id);
+  await editMessageText(env, chatId, messageId, historyDeleteConfirmText(found.entry), historyDeleteConfirmKeyboard(entryId));
+}
+
+/**
+ * Step 2: really delete the file from GitHub / Arvan, and only if that is
+ * confirmed drop the entry from history. hist_delforce_ skips the storage
+ * step (for entries whose file is unreachable, e.g. a revoked key).
+ */
+async function handleHistoryDeleteDo(env, callback, userId, chatId, messageId, data) {
+  const force = data.startsWith("hist_delforce_");
+  const entryId = data.replace(force ? "hist_delforce_" : "hist_delok_", "");
+  const found = await findHistoryEntry(env, userId, entryId);
+  if (!found) {
+    await answerCallbackQuery(env, callback.id, "❌ پیدا نشد", true);
+    return;
+  }
+  const { ownerId, entry } = found;
+  await answerCallbackQuery(env, callback.id);
+
+  if (!force) {
+    await editMessageText(env, chatId, messageId, `⏳ در حال حذف از ${storageLabel(detectStorage(entry))} ...`);
+    const result = await deleteFromStorage(env, entry, ownerId);
+    if (!result.ok) {
+      await editMessageText(env, chatId, messageId, historyDeleteFailedText(entry, result.detail), historyDeleteFailedKeyboard(entryId));
+      return;
+    }
+  }
+
+  await removeHistoryEntry(env, ownerId, entryId);
+  await showHistoryAgain(env, userId, chatId, messageId);
+  await sendMessage(
+    env,
+    chatId,
+    force
+      ? `🗂 «${entry.fileName || "بدون‌نام"}» فقط از تاریخچه حذف شد (فایل دست‌نخورده موند).`
+      : `🗑 «${entry.fileName || "بدون‌نام"}» از ${storageLabel(detectStorage(entry))} حذف شد.`
+  );
+}
+
+/**
+ * Non-admin "empty storage": deletes every file in the caller's own history
+ * (max HISTORY_LIMIT entries) from its real storage. Entries whose deletion
+ * fails stay in the list, and the result says which.
+ */
+async function handleEmptyMine(env, callback, userId, chatId, messageId) {
+  await answerCallbackQuery(env, callback.id);
+  const entries = await getHistory(env, userId);
+  if (entries.length === 0) {
+    await editMessageText(env, chatId, messageId, "🕘 تاریخچه خالیه، چیزی برای پاک کردن نیست.", backToMenuKeyboard());
+    return;
+  }
+
+  await editMessageText(env, chatId, messageId, `⏳ در حال حذف ${entries.length} فایل ...`);
+
+  let done = 0;
+  const failed = [];
+  for (const entry of entries) {
+    const r = await deleteFromStorage(env, entry, String(userId));
+    if (r.ok) {
+      await removeHistoryEntry(env, userId, entry.id);
+      done++;
+    } else {
+      failed.push(`• ${entry.fileName || "بدون‌نام"}: ${r.detail}`);
+    }
+  }
+
+  const text =
+    `🧹 ${done} فایل از مخزن حذف شد.` +
+    (failed.length ? `\n\n❌ ${failed.length} مورد حذف نشد (در تاریخچه موندن):\n${failed.join("\n")}` : "");
+  await editMessageText(env, chatId, messageId, text, backToMenuKeyboard());
+}
+
+/**
+ * Admin "empty storage": a full wipe is too big for one Worker request
+ * (subrequest limits), so it runs as a GitHub Action
+ * (.github/workflows/empty-storage.yml) which reports back in chat and then
+ * asks /internal/history-purge to drop the dangling history entries.
+ */
+async function handleEmptyAdmin(env, callback, userId, chatId, messageId, target) {
+  if (!isAdmin(userId, env)) {
+    await answerCallbackQuery(env, callback.id, "❌ فقط ادمین", true);
+    return;
+  }
+  await answerCallbackQuery(env, callback.id);
+
+  const storage = {};
+  if (target === "arvan" || target === "all") {
+    const providerId = DEFAULT_INTERNAL_PROVIDER_ID;
+    const rec = await getAdminRecord(env);
+    if (!rec || !rec[`${providerId}AccessKey`] || !rec[`${providerId}SecretKey`]) {
+      await editMessageText(
+        env,
+        chatId,
+        messageId,
+        "❌ کلید آروان ادمین تنظیم نشده. اول از تنظیمات کلید ثبت کنید، یا فقط GitHub رو خالی کنید.",
+        backToMenuKeyboard()
+      );
+      return;
+    }
+    storage.storage_access_key = rec[`${providerId}AccessKey`];
+    storage.storage_secret_key = rec[`${providerId}SecretKey`];
+    storage.storage_endpoint = rec[`${providerId}Endpoint`] || "";
+    storage.storage_bucket = rec[`${providerId}Bucket`] || "";
+  }
+
+  const ok = await dispatchGithubEvent(env, "empty_storage", {
+    chat_id: chatId,
+    targets: target === "gh" ? "github" : target === "arvan" ? "arvan" : "all",
+    storage,
+  });
+
+  if (!ok) {
+    await editMessageText(env, chatId, messageId, "❌ خطا در ارسال درخواست به گیت‌هاب", backToMenuKeyboard());
+    return;
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    "⏳ خالی‌سازی شروع شد. بعد از اتمام نتیجه توی یک پیام جدا می‌یاد (معمولاً کمتر از یک دقیقه).",
+    backToMenuKeyboard()
+  );
 }
 
 // ---------------------------------------------------------------------------
