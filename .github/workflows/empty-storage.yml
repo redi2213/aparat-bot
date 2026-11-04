@@ -1,0 +1,40 @@
+name: Empty Storage
+
+# Triggered by the bot's "🧹 خالی کردن مخزن" button (admin only) via
+# repository_dispatch -> see worker/telegram/handlers.js handleEmptyAdmin.
+# Credentials arrive inside the dispatch payload (same way uploads get them)
+# and are read by the script straight from the event file, never via env:.
+
+on:
+  repository_dispatch:
+    types:
+      - empty_storage
+
+concurrency:
+  group: empty-storage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  empty:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests boto3
+
+      - name: Empty storage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+        run: python actions/empty_storage/empty.py

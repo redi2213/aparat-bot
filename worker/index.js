@@ -3,6 +3,7 @@
 // Cloudflare Worker entry point. Handles two kinds of incoming requests:
 //   1. POST /            - Telegram webhook -> GitHub repository_dispatch
 //   0. GET /dl/<tag>/<name>?s=<sig> and POST /app/sign - signed file links (see download.js)
+//   3. POST /internal/history-purge - called by actions/empty_storage after it wipes a storage, to drop dangling history entries.
 //   2. POST /internal/history-add - called by GitHub Actions after a job
 //      finishes successfully, to record it in the user's history. This
 //      exists because Actions has no direct access to Cloudflare KV; this
@@ -36,8 +37,9 @@
 //   STATE            - see state/session.js, state/users.js, state/history.js
 
 import { handleMessage, handleCallback } from "./telegram/handlers.js";
-import { addHistoryEntry } from "./state/history.js";
-import { isAdmin, recordUsage } from "./state/users.js";
+import { addHistoryEntry, purgeHistoryByStorage } from "./state/history.js";
+import { isAdmin, recordUsage, listUsers } from "./state/users.js";
+import { detectStorage, STORAGE_GITHUB, STORAGE_ARVAN } from "./storage/detect.js";
 import { handleDownload, handleAppSign } from "./download.js";
 
 export default {
@@ -54,6 +56,10 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/internal/history-add") {
       return handleHistoryAdd(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/history-purge") {
+      return handleHistoryPurge(request, env);
     }
 
     if (request.method !== "POST") {
@@ -121,11 +127,22 @@ async function handleHistoryAdd(request, env) {
   }
 
   try {
+    // Remember where the file physically lives, so the bot can show it in
+    // the history list and later delete it from the right place.
+    const storage =
+      storageKind === "internal"
+        ? STORAGE_ARVAN
+        : storageKind === "external"
+          ? STORAGE_GITHUB
+          : detectStorage({ link });
+
     await addHistoryEntry(env, userId, {
       source,
       fileName: fileName || null,
       fileSize: fileSize || null,
       link,
+      ...(storage ? { storage } : {}),
+      ...(storage === STORAGE_ARVAN ? { usedPersonalKey: !!usedPersonalKey } : {}),
     });
 
     if (storageKind === "internal" || storageKind === "external") {
@@ -142,6 +159,40 @@ async function handleHistoryAdd(request, env) {
     return new Response("OK", { status: 200 });
   } catch (err) {
     console.error("history-add error:", err);
+    return new Response("Internal Error", { status: 500 });
+  }
+}
+
+/**
+ * Called by actions/empty_storage/empty.py after it has really wiped a
+ * storage ("github" | "arvan" | "all"). Removes the now-dangling entries
+ * from every user's history. Body: { storage }.
+ */
+async function handleHistoryPurge(request, env) {
+  if (request.headers.get("X-Internal-Secret") !== env.INTERNAL_SECRET) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  const which = body && body.storage;
+  const storages =
+    which === "all" ? [STORAGE_GITHUB, STORAGE_ARVAN] : which === STORAGE_GITHUB || which === STORAGE_ARVAN ? [which] : null;
+  if (!storages) return new Response("Bad storage", { status: 400 });
+
+  try {
+    const users = await listUsers(env);
+    const ids = [env.USER_ID, ...users.map((u) => u.id)];
+    let removed = 0;
+    for (const id of ids) removed += await purgeHistoryByStorage(env, id, storages);
+    return new Response(JSON.stringify({ removed }), { status: 200, headers: { "Content-Type": "application/json" } });
+  } catch (err) {
+    console.error("history-purge error:", err);
     return new Response("Internal Error", { status: 500 });
   }
 }
